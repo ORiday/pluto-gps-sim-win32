@@ -7,6 +7,11 @@ Project based on [gps-sdr-sim](https://github.com/osqzss/gps-sdr-sim).
 
 [Linux version](https://github.com/Mictronics/pluto-gps-sim)
 
+This project has been update to support dynamic GPS position updates from GGA and ECEF CSV files, 
+based on the original gps-sdr-sim project.
+Since positions are updated in real-time the generation of a large gigabyte bin file is not required.
+Additional option to loop the playback and change the position update interval have been included.  
+
 ### Generating the GPS signal
 The user is able to assign a static location directly through the command line.
 
@@ -49,16 +54,20 @@ pluto-gps-sim [options]
 Options:
   -e <gps_nav>     RINEX navigation file for GPS ephemerides (required)
   -f               Pull actual RINEX navigation file from NASA FTP server
-  -c <location>    ECEF X,Y,Z in meters (static mode) e.g. 3967283.15,1022538.18,4872414.48
-  -l <location>    Lat,Lon,Hgt (static mode) e.g. 30.286502,120.032669,100
+  -L               Loop the dynamic mode
+  -m <motion_time> Motion points are updated at this interval [Hz] (default: 10)
+  -u <user_motion> User motion file (dynamic mode)
+  -g <nmea_gga>    NMEA GGA stream (dynamic mode)
+  -c <location>    ECEF X,Y,Z in meters (static mode) e.g. 3967283.154,1022538.181,4872414.484
+  -l <location>    Lat,Lon,Hgt (static mode) e.g. 35.681298,139.766247,10.0
   -t <date,time>   Scenario start time YYYY/MM/DD,hh:mm:ss
-  -T <date,time>   Overwrite TOC and TOE to scenario start time (use ```now``` for actual time)
+  -T <date,time>   Overwrite TOC and TOE to scenario start time (use 'now' for actual time)
   -s <frequency>   Sampling frequency [Hz] (default: 2600000)
   -i               Disable ionospheric delay for spacecraft scenario
   -v               Show details about simulated channels
   -A <attenuation> Set TX attenuation [dB] (default -20.0)
-  -B <bw>          Set RF bandwidth [MHz] (default 5.0)
-  -U <uri>         ADALM-Pluto URI (eg. usb:1.2.5)
+  -B <bw>          Set RF bandwidth [MHz] (default 3.0)
+  -U <uri>         ADALM-Pluto URI
   -N <network>     ADALM-Pluto network IP or hostname (default pluto.local)
 ```
 
@@ -66,6 +75,12 @@ Set static mode location:
 
 ```
 > pluto-gps-sim -l 38.0,24.0,300 -e brdc.n -T now -A 0.0 -U usb:3.5.5
+```
+
+Set dynamic mode location, with continuous loop:
+
+```
+> pluto-gps-sim -u circle.csv -L -e brdc.n -T now -A 0.0 -U usb:3.5.5
 ```
 
 Set TX attenuation:

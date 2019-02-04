@@ -37,6 +37,8 @@
 #define NUM_SAMPLES 260000
 #define BUFFER_SIZE (NUM_SAMPLES * 2 * sizeof(int16_t))
 
+#define USER_MOTION_SIZE	 40000
+
 struct stream_cfg {
 	long long bw_hz; // Analog banwidth in Hz
 	long long fs_hz; // Baseband sample rate in Hz
@@ -1371,6 +1373,121 @@ static void computeCodePhase(channel_t *chan, range_t rho1, double dt) {
 	return;
 }
 
+/*! \brief Read the list of user motions from the input file
+*  \param[out] xyz Output array of ECEF vectors for user motion
+*  \param[[in] filename File name of the text input file
+*  \returns Number of user data motion records read, -1 on error
+*/
+static int readUserMotion(double xyz[USER_MOTION_SIZE][3], const char *filename)
+{
+	FILE *fp;
+	int numd;
+	char str[MAX_CHAR];
+	double t, x, y, z;
+
+	if (fopen_s(&fp, filename, "rt"))
+		return(-1);
+
+	for (numd = 0; numd<USER_MOTION_SIZE; numd++)
+	{
+		if (fgets(str, MAX_CHAR, fp) == NULL)
+			break;
+
+		if (EOF == sscanf_s(str, "%lf,%lf,%lf,%lf", &t, &x, &y, &z)) // Read CSV line
+			break;
+
+		xyz[numd][0] = x;
+		xyz[numd][1] = y;
+		xyz[numd][2] = z;
+	}
+
+	fclose(fp);
+
+	return (numd);
+}
+
+static int readNmeaGGA(double xyz[USER_MOTION_SIZE][3], const char *filename)
+{
+	FILE *fp;
+	int numd = 0;
+	char str[MAX_CHAR];
+	char *token;
+	char *next_token = NULL;
+	double llh[3], pos[3];
+	char tmp[8];
+
+	if (fopen_s(&fp, filename, "rt"))
+		return(-1);
+
+	while (1)
+	{
+		if (fgets(str, MAX_CHAR, fp) == NULL)
+			break;
+
+		token = strtok_s(str, ",", &next_token);
+
+		if (strncmp(token + 3, "GGA", 3) == 0)
+		{
+			token = strtok_s(NULL, ",", &next_token); // Date and time
+
+			token = strtok_s(NULL, ",", &next_token); // Latitude
+			strncpy_s(tmp, sizeof(tmp), token, 2);
+			tmp[2] = 0;
+
+			llh[0] = atof(tmp) + atof(token + 2) / 60.0;
+
+			token = strtok_s(NULL, ",", &next_token); // North or south
+			if (token[0] == 'S')
+				llh[0] *= -1.0;
+
+			llh[0] /= R2D; // in radian
+
+			token = strtok_s(NULL, ",", &next_token); // Longitude
+			strncpy_s(tmp, sizeof(tmp), token, 3);
+			tmp[3] = 0;
+
+			llh[1] = atof(tmp) + atof(token + 3) / 60.0;
+
+			token = strtok_s(NULL, ",", &next_token); // East or west
+			if (token[0] == 'W')
+				llh[1] *= -1.0;
+
+			llh[1] /= R2D; // in radian
+
+			token = strtok_s(NULL, ",", &next_token); // GPS fix
+			token = strtok_s(NULL, ",", &next_token); // Number of satellites
+			token = strtok_s(NULL, ",", &next_token); // HDOP
+
+			token = strtok_s(NULL, ",", &next_token); // Altitude above meas sea level
+
+			llh[2] = atof(token);
+
+			token = strtok_s(NULL, ",", &next_token); // in meter
+
+			token = strtok_s(NULL, ",", &next_token); // Geoid height above WGS84 ellipsoid
+
+			llh[2] += atof(token);
+
+			// Convert geodetic position into ECEF coordinates
+			llh2xyz(llh, pos);
+
+			xyz[numd][0] = pos[0];
+			xyz[numd][1] = pos[1];
+			xyz[numd][2] = pos[2];
+
+			// Update the number of track points
+			numd++;
+
+			if (numd >= USER_MOTION_SIZE)
+				break;
+		}
+	}
+
+	fclose(fp);
+
+	return (numd);
+}
+
 static int generateNavMsg(gpstime_t g, channel_t *chan, int init) {
 	int iwrd, isbf;
 	gpstime_t g0;
@@ -1549,6 +1666,10 @@ static void usage(void) {
 		"Options:\n"
 		"  -e <gps_nav>     RINEX navigation file for GPS ephemerides (required)\n"
 		"  -f               Pull actual RINEX navigation file from NASA FTP server\n"
+		"  -L               Loop the dynamic mode\n"
+		"  -m <motion_time> Motion points are updated at this interval [Hz] (default: 10)\n"
+		"  -u <user_motion> User motion file (dynamic mode)\n"
+		"  -g <nmea_gga>    NMEA GGA stream (dynamic mode)\n"
 		"  -c <location>    ECEF X,Y,Z in meters (static mode) e.g. 3967283.154,1022538.181,4872414.484\n"
 		"  -l <location>    Lat,Lon,Hgt (static mode) e.g. 35.681298,139.766247,10.0\n"
 		"  -t <date,time>   Scenario start time YYYY/MM/DD,hh:mm:ss\n"
@@ -1557,7 +1678,7 @@ static void usage(void) {
 		"  -i               Disable ionospheric delay for spacecraft scenario\n"
 		"  -v               Show details about simulated channels\n"
 		"  -A <attenuation> Set TX attenuation [dB] (default -20.0)\n"
-		"  -B <bw>          Set RF bandwidth [MHz] (default 5.0)\n"
+		"  -B <bw>          Set RF bandwidth [MHz] (default 3.0)\n"
 		"  -U <uri>         ADALM-Pluto URI\n"
 		"  -N <network>     ADALM-Pluto network IP or hostname (default pluto.local)\n");
 
@@ -1752,7 +1873,7 @@ int main(int argc, char *argv[]) {
 	double delt;
 	int isamp;
 
-	double xyz[1][3];
+	static double xyz[USER_MOTION_SIZE][3]; // place on the heap, not the stack
 
 	bool use_ftp = false;
 	struct ftp_file ftp = {
@@ -1761,6 +1882,15 @@ int main(int argc, char *argv[]) {
 	};
 
 	const char* navfile = NULL;
+	const char* umfile = NULL;
+
+	bool static_loc_mode = false;
+	bool loop_motion_pts = false;		// loop the motion points
+	int motion_interval_10hz = 1;       // the interval in 10hz increments to update motion points
+	int motion_elapsed_time = 0;			// the elapsed time between motion intervals
+	int motion_interval_time = 0;		// motion interval timer
+	int num_motion_pts = 0;				// number of motion points
+	int motion_pts_count = 0;			// dynamic motion points counter
 
 	int result;
 	double gain[MAX_CHAN];
@@ -1818,7 +1948,7 @@ int main(int argc, char *argv[]) {
 		exit(1);
 	}
 
-	while ((result = getopt(argc, argv, "e:u:g:c:l:s:T:t:A:B:U:N:vfi?")) != -1) {
+	while ((result = getopt(argc, argv, "e:m:u:g:c:l:s:T:t:A:B:U:N:vfiL?")) != -1) {
 		switch (result) {
 		case 'e':
 			navfile = optarg;
@@ -1826,13 +1956,29 @@ int main(int argc, char *argv[]) {
 		case 'f':
 			use_ftp = true;
 			break;
+		case 'L':
+			loop_motion_pts = true;
+			break;
+		case 'm':
+			motion_interval_10hz = round(10.0/atof(optarg));		// convert to tenth of second interval
+			break;
+		case 'u':
+			umfile = optarg;
+			num_motion_pts = readUserMotion(xyz, umfile);		// Read user motion file
+			break;
+		case 'g':
+			umfile = optarg;
+			num_motion_pts = readNmeaGGA(xyz, umfile);			// Read NMEA GGA file
+			break;
 		case 'c':
 			// Static ECEF coordinates input mode
+			static_loc_mode = true;
 			sscanf_s(optarg, "%lf,%lf,%lf", &xyz[0][0], &xyz[0][1], &xyz[0][2]);
 			break;
 		case 'l':
 			// Static geodetic coordinates input mode
 			// Added by scateu@gmail.com
+			static_loc_mode = true;
 			sscanf_s(optarg, "%lf,%lf,%lf", &llh[0], &llh[1], &llh[2]);
 			llh[0] = llh[0] / R2D; // convert to RAD
 			llh[1] = llh[1] / R2D; // convert to RAD
@@ -1916,9 +2062,27 @@ int main(int argc, char *argv[]) {
 	////////////////////////////////////////////////////////////
 	// Receiver position
 	////////////////////////////////////////////////////////////
+	if (false == static_loc_mode)
+	{
+		if (num_motion_pts == -1)
+		{
+			fprintf(stderr, "ERROR: Failed to open user motion / NMEA GGA file.\n");
+			exit(1);
+		}
+		else if (num_motion_pts == 0)
+		{
+			fprintf(stderr, "ERROR: Failed to read user motion / NMEA GGA data.\n");
+			exit(1);
+		}
+	}
+	else
+	{
+		// Static geodetic coordinates input mode: "-l"
+		// Added by scateu@gmail.com 
+		fprintf(stderr, "Using static location mode.\n");
 
-	// Static geodetic coordinates input mode: "-l"
-	fprintf(stderr, "Using static location mode.\n");
+		num_motion_pts = 1;
+	}
 
 	/*
 	fprintf(stderr, "xyz = %11.1f, %11.1f, %11.1f\n", xyz[0][0], xyz[0][1], xyz[0][2]);
@@ -1965,7 +2129,11 @@ int main(int argc, char *argv[]) {
 
 		if (FtpGetFileA(hFtpSession, filename, "rinex.Z", FALSE, FILE_ATTRIBUTE_NORMAL, FTP_TRANSFER_TYPE_ASCII | INTERNET_FLAG_RELOAD, 0))
 		{
-			system("zcat rinex.Z > brdc.n");
+			if (system("zcat rinex.Z > brdc.n"))
+			{
+				// no zcat, so try gzip
+				system("gzip -c -f -d rinex.Z > brdc.n");
+			}
 			_unlink("rinex.Z");
 			char default_navfile[] = "brdc.n";
 			navfile = default_navfile;
@@ -2173,7 +2341,7 @@ int main(int argc, char *argv[]) {
 				sv = chan[i].prn - 1;
 
 				// Current pseudorange
-				computeRange(&rho, eph[ieph][sv], &ionoutc, grx, xyz[0]);
+				computeRange(&rho, eph[ieph][sv], &ionoutc, grx, xyz[motion_pts_count]);
 
 				chan[i].azel[0] = rho.azel[0];
 				chan[i].azel[1] = rho.azel[1];
@@ -2301,10 +2469,44 @@ int main(int argc, char *argv[]) {
 			}
 
 			// Update channel allocation
-			allocateChannel(chan, eph[ieph], ionoutc, grx, xyz[0], elvmask);
+			allocateChannel(chan, eph[ieph], ionoutc, grx, xyz[motion_pts_count], elvmask);
+
+			// Show ditails about simulated channels
+			if (verb == TRUE)
+			{
+				fprintf(stderr, "\n");
+				for (i = 0; i<MAX_CHAN; i++)
+				{
+					if (chan[i].prn>0)
+						fprintf(stderr, "%02d %6.1f %5.1f %11.1f %5.1f\n", chan[i].prn,
+							chan[i].azel[0] * R2D, chan[i].azel[1] * R2D, chan[i].rho0.d, chan[i].rho0.iono_delay);
+				}
+			}
 		}
 		// Update receiver time
 		grx = incGpsTime(grx, 0.1);
+
+		if (!static_loc_mode)
+		{
+			motion_elapsed_time++;
+			if (motion_interval_10hz >= motion_elapsed_time)
+			{
+				motion_elapsed_time = 0;
+				motion_pts_count++;				// increment the motion counter
+				if (motion_pts_count >= num_motion_pts)
+				{
+					if (loop_motion_pts)
+					{
+						motion_pts_count = 0;	// reset motion counter back to start
+					}
+					else
+					{
+						// we are at the end of the simulation
+						goto exit_main_thread;
+					}
+				}
+			}
+		}
 	}
 
 exit_main_thread:
